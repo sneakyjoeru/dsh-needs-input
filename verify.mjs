@@ -78,4 +78,35 @@ assert.deepEqual(mod.workspaceCounts(snap, {}, 'draft').get('onlyHidden'), { yel
 const unarchived = { ...snap, workspaces: { ...snap.workspaces, archivedSessionIds: [] } };
 assert.deepEqual(mod.workspaceCounts(unarchived, {}, undefined).get('allArchived'), { yellow: 1, green: 1 }, 'unarchiving brings the dots back');
 
-console.log('ALL PASS: module-loader wrapper, shell.overlay registration, projection transitions, per-colour watermarks, workspace aggregation, archived/hidden chats excluded');
+// 5. Fresh browser / cleared storage must NOT light up every finished chat (owner report 2026-10-27:
+//    "occasionally marks all chats in workspace as unread"). Marks seed only for old activity; a chat
+//    that finishes while the page is open still shows.
+const NOW = 1_000_000;
+const row = (id, updatedAt, st) => ({ id, updatedAt });
+const seedSnap = {
+  sessions: {
+    byId: { old1: row('old1', NOW - 86_400_000), old2: row('old2', NOW - 3_600_000), fresh: row('fresh', NOW + 500) },
+    projectionsBySession: {
+      old1: proj(states.b),   // finished long ago
+      old2: proj(states.a),   // blocked long ago
+      fresh: proj(states.b),  // finished while this page was open
+    },
+  },
+  workspaces: { archivedSessionIds: [], items: [{ workspaceId: 'w', sessionIds: ['old1', 'old2', 'fresh'] }] },
+  status: new Map(),
+};
+const seeded = mod.seedMarks(seedSnap, {}, NOW);
+assert.ok(seeded, 'first paint seeds');
+assert.equal(seeded['old1:g'], 12, 'old completion recorded as already read');
+assert.equal(seeded['old2:y'], 11, 'old block recorded as already read');
+assert.equal(seeded['fresh:y'], undefined, 'activity newer than the page load stays unseeded');
+assert.equal(seeded['fresh:g'], undefined);
+assert.deepEqual(mod.workspaceCounts(seedSnap, seeded, undefined).get('w'), { yellow: 0, green: 1 }, 'only the chat that finished while watching counts; not the whole workspace');
+assert.equal(mod.seedMarks(seedSnap, seeded, NOW), null, 'already-seeded marks are never rewritten (no loop, read state preserved)');
+const partial = { 'old1:y': 11, 'old1:g': 12 };
+const afterPartial = mod.seedMarks(seedSnap, partial, NOW);
+assert.equal(afterPartial['old1:g'], 12, 'an existing mark is left alone');
+assert.equal(afterPartial['old2:y'], 11, 'a missing mark is still filled in');
+assert.equal(mod.seedMarks({ sessions: { byId: {}, projectionsBySession: {} }, workspaces: { items: [] } }, {}, NOW), null, 'nothing to seed -> no write');
+
+console.log('ALL PASS: module-loader wrapper, shell.overlay registration, projection transitions, per-colour watermarks, workspace aggregation, archived/hidden chats excluded, first-visit seeding');

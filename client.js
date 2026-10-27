@@ -10,6 +10,8 @@ window.__ModuleLoader__.load({
     const React = require("react");
 
     const STORAGE_KEY = "dsh.needs-input.read-v1";
+    // Marks seed only for activity older than this page's own start.
+    const PAGE_LOADED_AT = Date.now();
     const YELLOW = "var(--dsw-alias-state-warning-primary, #f2c94c)";
     const GREEN = "var(--dsw-alias-state-success-primary, #45b36b)";
 
@@ -24,6 +26,33 @@ window.__ModuleLoader__.load({
     }
     function yellowUnread(state, read) { return Boolean(state && state.needsInput !== "none" && state.needsInputSeq > read); }
     function greenUnread(state, read) { return Boolean(state && state.completedSeq > 0 && state.completedSeq > read); }
+
+    // Read marks are per-browser (localStorage) and DSH's own `completionUnread` lives only in the
+    // page's memory — so on a NEW browser, a cleared storage, another device, or the other origin
+    // (127.0.0.1:3081 vs the public hostname) every chat that ever finished looked unread and the
+    // whole workspace lit up (owner report 2026-10-27). Fix: when a session has no mark yet AND its
+    // last activity predates this page load, record its current sequences as already read. A chat
+    // that finishes while the page is open still has updatedAt >= pageLoadedAt, so it still lights up.
+    // Pure so verify.mjs can exercise it against the shipped code.
+    function seedMarks({ sessions, workspaces }, read, pageLoadedAt) {
+      const next = { ...read };
+      let changed = false;
+      const ids = new Set();
+      for (const id of Object.keys(sessions.byId || {})) ids.add(id);
+      for (const w of workspaces.items || []) for (const id of w.sessionIds || []) ids.add(id);
+      for (const id of ids) {
+        if (next[id + ":y"] !== undefined || next[id + ":g"] !== undefined) continue;
+        const st = sessions.projectionsBySession?.[id]?.values?.needsInput;
+        if (!st) continue; // nothing folded yet: decide when it arrives
+        const updated = sessions.byId?.[id]?.updatedAt;
+        if (!(typeof updated === "number" && updated >= pageLoadedAt)) {
+          next[id + ":y"] = Number(st.needsInputSeq ?? 0);
+          next[id + ":g"] = Number(st.completedSeq ?? 0);
+          changed = true;
+        }
+      }
+      return changed ? next : null;
+    }
 
     // Workspace rows: independent yellow and green aggregates over the members the sidebar would
     // list, including rows that are collapsed or paged out of the tree. A chat that cannot be
@@ -47,7 +76,7 @@ window.__ModuleLoader__.load({
           if (!listed(id)) continue;
           const st = stateOf(id);
           if (yellowUnread(st, Number(read[id + ":y"] ?? 0))) yellow++;
-          else if (id !== main && (greenUnread(st, Number(read[id + ":g"] ?? 0)) || status.get(id)?.completionUnread)) green++;
+          else if (id !== main && (greenUnread(st, Number(read[id + ":g"] ?? 0)) || status?.get?.(id)?.completionUnread)) green++;
         }
         counts.set(w.workspaceId, { yellow, green });
       }
@@ -76,7 +105,9 @@ window.__ModuleLoader__.load({
           const snap = latest.current;
           if (!snap) return;
           const { sessions, workspaces, status } = snap;
-          const read = readMarks();
+          let read = readMarks();
+          const seeded = seedMarks(snap, read, PAGE_LOADED_AT);
+          if (seeded) { read = seeded; writeMarks(seeded); }
           const stateOf = (id) => sessions.projectionsBySession?.[id]?.values?.needsInput;
           const main = Object.values(sessions.byId || {}).find((s) => (s.retainedBy?.mainView ?? 0) > 0)?.id;
 
@@ -196,6 +227,7 @@ window.__ModuleLoader__.load({
     exports.inject = ["slots", "sessions"];
     exports.apply = apply;
     exports.workspaceCounts = workspaceCounts; // exposed for verify.mjs
+    exports.seedMarks = seedMarks;             // exposed for verify.mjs
     return module.exports;
   },
 });
