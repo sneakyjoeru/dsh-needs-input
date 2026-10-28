@@ -24,6 +24,120 @@ window.__ModuleLoader__.load({
     function writeMarks(v) {
       try { localStorage.setItem(STORAGE_KEY, JSON.stringify(v)); } catch { /* storage disabled */ }
     }
+
+    // Host-side read marks (owner request 2026-10-28: "independent from the device that viewed chats").
+    // The host plugin declares a settings namespace holding `acks` = {sessionId: {y,g,t}}; the settings
+    // API is same-origin for every browser, so a chat read on the desktop is read on the phone too.
+    // localStorage stays as a cache/fallback for when that API is unavailable.
+    const ACK_NS_HINTS = ["needs-input-client", "dsh-needs-input", "needs-input"];
+    const server = { ns: null, acks: {}, rows: [], revision: 0, loaded: false, remote: null };
+    let pushTimer = null;
+
+    /** Marks = the higher of the host store and the local cache, per chat and per colour. */
+    function combineMarks(local, hostAcks) {
+      const out = { ...local };
+      for (const [id, ack] of Object.entries(hostAcks || {})) {
+        for (const kind of ["y", "g"]) {
+          const srv = Number(ack?.[kind] ?? 0);
+          if (srv > Number(out[id + ":" + kind] ?? 0)) out[id + ":" + kind] = srv;
+        }
+      }
+      return out;
+    }
+
+    /** The mark to store for one chat once it has been viewed. */
+    function ackFor(state, existing) {
+      const y = Math.max(Number(existing?.y ?? 0), Number(state?.needsInputSeq ?? 0));
+      const g = Math.max(Number(existing?.g ?? 0), Number(state?.completedSeq ?? 0));
+      return { y, g, t: Date.now() };
+    }
+
+    function pickNamespace(list) {
+      const namespaces = list || [];
+      for (const hint of ACK_NS_HINTS) {
+        const hit = namespaces.find((n) => n.ns === hint);
+        if (hit) return hit;
+      }
+      // fall back to the only namespace whose value carries `acks`
+      return namespaces.find((n) => n?.value && typeof n.value === "object" && "acks" in n.value) || null;
+    }
+
+    async function loadServerAcks() {
+      const remote = server.remote;
+      if (!remote?.settings?.describe) return false;
+      try {
+        const described = await remote.settings.describe();
+        const ns = pickNamespace(described?.namespaces);
+        if (!ns) return false;
+        server.ns = ns.ns;
+        const rows = [ns.value?.acks, ns.user?.acks].find((v) => Array.isArray(v) && v.length) || [];
+        server.rows = rows;
+        server.acks = rowsToMap(server.rows);
+        server.revision = Number(ns.revision ?? 0);
+        server.loaded = true;
+        return true;
+      } catch { return false; }
+    }
+
+    function queuePush() {
+      const remote = server.remote;
+      if (!remote?.settings?.update || !server.ns) return;
+      if (pushTimer) clearTimeout(pushTimer);
+      pushTimer = setTimeout(async () => {
+        pushTimer = null;
+        try {
+          await remote.settings.update(server.ns, { acks: mapToRows(server.acks, server.rows) }, server.revision);
+          server.revision += 1;
+        } catch {
+          // another device wrote first: re-read, merge ours back in, retry once
+          const mine = server.acks;
+          if (await loadServerAcks()) {
+            server.acks = combineAckObjects(server.acks, mine);
+            try { await remote.settings.update(server.ns, { acks: mapToRows(server.acks, server.rows) }, server.revision); server.revision += 1; } catch { /* keep local only */ }
+          }
+        }
+        window.dispatchEvent(new Event("dsh-needs-input-refresh"));
+      }, 600);
+    }
+
+    /** Per-chat merge of two ack maps, newest wins per colour. */
+    /** Host rows [{id,y,g,t}] -> {id: {y,g,t}}. */
+    function rowsToMap(rows) {
+      const out = {};
+      for (const row of Array.isArray(rows) ? rows : []) {
+        if (!row || typeof row.id !== "string") continue;
+        const cur = out[row.id] || { y: 0, g: 0, t: 0 };
+        out[row.id] = {
+          y: Math.max(cur.y, Number(row.y ?? 0)),
+          g: Math.max(cur.g, Number(row.g ?? 0)),
+          t: Math.max(cur.t, Number(row.t ?? 0)),
+        };
+      }
+      return out;
+    }
+
+    /** {id: {y,g,t}} -> host rows, merging any rows this device did not touch. */
+    function mapToRows(map, keep) {
+      const merged = { ...rowsToMap(keep) };
+      for (const [id, ack] of Object.entries(map || {})) merged[id] = { ...(merged[id] || {}), ...ack };
+      return Object.entries(merged)
+        .filter(([id]) => typeof id === "string" && id.length > 0)
+        .map(([id, ack]) => ({ id, y: Number(ack.y ?? 0), g: Number(ack.g ?? 0), t: Number(ack.t ?? 0) }))
+        .sort((a, b) => a.id.localeCompare(b.id));
+    }
+
+    function combineAckObjects(a, b) {
+      const out = { ...a };
+      for (const [id, ack] of Object.entries(b || {})) {
+        const cur = out[id] || {};
+        out[id] = {
+          y: Math.max(Number(cur.y ?? 0), Number(ack?.y ?? 0)),
+          g: Math.max(Number(cur.g ?? 0), Number(ack?.g ?? 0)),
+          t: Math.max(Number(cur.t ?? 0), Number(ack?.t ?? 0)),
+        };
+      }
+      return out;
+    }
     function yellowUnread(state, read) { return Boolean(state && state.needsInput !== "none" && state.needsInputSeq > read); }
     function greenUnread(state, read) { return Boolean(state && state.completedSeq > 0 && state.completedSeq > read); }
 
@@ -108,8 +222,23 @@ window.__ModuleLoader__.load({
           let read = readMarks();
           const seeded = seedMarks(snap, read, PAGE_LOADED_AT);
           if (seeded) { read = seeded; writeMarks(seeded); }
+          read = combineMarks(read, server.acks);
           const stateOf = (id) => sessions.projectionsBySession?.[id]?.values?.needsInput;
           const main = Object.values(sessions.byId || {}).find((s) => (s.retainedBy?.mainView ?? 0) > 0)?.id;
+
+          // Reading a chat in the main view is reading it: acknowledge continuously, not only on a
+          // sidebar click (owner report 2026-10-28 — chats that were read still came back unread).
+          if (main) {
+            const st = stateOf(main);
+            if (st && (Number(st.needsInputSeq ?? 0) > Number(read[main + ":y"] ?? 0) || Number(st.completedSeq ?? 0) > Number(read[main + ":g"] ?? 0))) {
+              const ack = ackFor(st, { y: read[main + ":y"], g: read[main + ":g"] });
+              read[main + ":y"] = ack.y;
+              read[main + ":g"] = ack.g;
+              writeMarks({ ...readMarks(), [main + ":y"]: ack.y, [main + ":g"]: ack.g });
+              server.acks = { ...server.acks, [main]: ack };
+              queuePush();
+            }
+          }
 
           // Session rows: additive dots in the leading cell. The native dot (pending / running /
           // completionUnread) owns that cell while it is shown; we only add ours when it is idle.
@@ -167,12 +296,11 @@ window.__ModuleLoader__.load({
           if (!row) return;
           const id = row.getAttribute("data-row-key").slice("session:".length);
           const st = latest.current?.sessions.projectionsBySession?.[id]?.values?.needsInput;
-          const read = readMarks();
-          writeMarks({
-            ...read,
-            [id + ":y"]: Math.max(Number(read[id + ":y"] ?? 0), Number(st?.needsInputSeq ?? 0)),
-            [id + ":g"]: Math.max(Number(read[id + ":g"] ?? 0), Number(st?.completedSeq ?? 0)),
-          });
+          const read = combineMarks(readMarks(), server.acks);
+          const ack = ackFor(st, { y: read[id + ":y"], g: read[id + ":g"] });
+          writeMarks({ ...readMarks(), [id + ":y"]: ack.y, [id + ":g"]: ack.g });
+          server.acks = { ...server.acks, [id]: ack };
+          queuePush();
           paint();
         };
 
@@ -197,6 +325,18 @@ window.__ModuleLoader__.load({
     }
 
     function apply(ctx) {
+      // Host-side read marks: load once, then re-read periodically and whenever the tab regains
+      // focus, so an acknowledgement made on another device clears the dots here too.
+      server.remote = ctx?.remote || null;
+      if (server.remote?.settings?.describe) {
+        const refresh = () => { loadServerAcks().then((ok) => { if (ok) window.dispatchEvent(new Event("dsh-needs-input-refresh")); }); };
+        refresh();
+        setInterval(refresh, 15000);
+        if (typeof window !== "undefined" && window.addEventListener) {
+          window.addEventListener("focus", refresh);
+          document.addEventListener("visibilitychange", () => { if (!document.hidden) refresh(); });
+        }
+      }
       // The main chat auto-acknowledges: when a chat is open in the main view, mark it read as it
       // finishes so a later refresh does not resurrect a dot for the chat the user was watching.
       const sessions = ctx.get ? ctx.get("sessions") : undefined;
@@ -228,6 +368,12 @@ window.__ModuleLoader__.load({
     exports.apply = apply;
     exports.workspaceCounts = workspaceCounts; // exposed for verify.mjs
     exports.seedMarks = seedMarks;             // exposed for verify.mjs
+    exports.combineMarks = combineMarks;       // exposed for verify.mjs
+    exports.combineAckObjects = combineAckObjects;
+    exports.ackFor = ackFor;
+    exports.pickNamespace = pickNamespace;
+    exports.rowsToMap = rowsToMap;
+    exports.mapToRows = mapToRows;
     return module.exports;
   },
 });

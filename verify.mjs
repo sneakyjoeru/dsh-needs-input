@@ -109,4 +109,29 @@ assert.equal(afterPartial['old1:g'], 12, 'an existing mark is left alone');
 assert.equal(afterPartial['old2:y'], 11, 'a missing mark is still filled in');
 assert.equal(mod.seedMarks({ sessions: { byId: {}, projectionsBySession: {} }, workspaces: { items: [] } }, {}, NOW), null, 'nothing to seed -> no write');
 
-console.log('ALL PASS: module-loader wrapper, shell.overlay registration, projection transitions, per-colour watermarks, workspace aggregation, archived/hidden chats excluded, first-visit seeding');
+// 6. Host-side marks (owner request 2026-10-28: independent from the device that viewed the chats).
+//    The read state lives in the plugin's settings namespace, so a desktop acknowledgement clears the
+//    phone's dot; local storage only caches/falls back.
+assert.deepEqual(mod.combineMarks({ 'a:y': 5 }, { a: { y: 9, g: 3 } }), { 'a:y': 9, 'a:g': 3 }, 'host mark wins when higher');
+assert.deepEqual(mod.combineMarks({ 'a:y': 12 }, { a: { y: 9 } }), { 'a:y': 12 }, 'local mark kept when higher (just clicked, not yet flushed)');
+assert.deepEqual(mod.combineMarks({}, {}), {}, 'no marks, no dots');
+assert.deepEqual(mod.combineMarks({ 'x:g': 4 }, { x: { y: 0, g: 0 } }), { 'x:g': 4 }, 'zero host marks never clear a local one');
+const acked = mod.ackFor({ needsInputSeq: 7, completedSeq: 11 }, { y: 3, g: 2 });
+assert.equal(acked.y, 7); assert.equal(acked.g, 11); assert.ok(acked.t > 0);
+assert.deepEqual(mod.combineAckObjects({ a: { y: 1, g: 1, t: 10 } }, { a: { y: 5, g: 0, t: 4 }, b: { y: 2, g: 0, t: 2 } }),
+  { a: { y: 5, g: 1, t: 10 }, b: { y: 2, g: 0, t: 2 } }, 'two devices merge per chat, newest per colour');
+const nsList = { namespaces: [
+  { ns: 'llm-pi-ai', value: { providers: {} }, revision: 3 },
+  { ns: 'needs-input-client', value: { acks: [{ id: 's1', y: 4, g: 9, t: 1 }] }, revision: 7 },
+] };
+const picked = mod.pickNamespace(nsList.namespaces);
+assert.equal(picked.ns, 'needs-input-client');
+assert.equal(picked.revision, 7);
+assert.equal(mod.pickNamespace([{ ns: 'other', value: { acks: [] } }]).ns, 'other', 'fallback: the only namespace carrying acks');
+assert.deepEqual(mod.rowsToMap([{ id: 'a', y: 2, g: 5, t: 1 }, { id: 'a', y: 7, g: 0, t: 3 }, { id: 'b' }]),
+  { a: { y: 7, g: 5, t: 3 }, b: { y: 0, g: 0, t: 0 } }, 'host rows fold to a map, highest per colour');
+assert.deepEqual(mod.mapToRows({ a: { y: 7, g: 5, t: 3 } }, [{ id: 'b', y: 1, g: 1, t: 1 }]),
+  [{ id: 'a', y: 7, g: 5, t: 3 }, { id: 'b', y: 1, g: 1, t: 1 }], 'writing keeps rows this device did not touch');
+assert.equal(mod.pickNamespace([]), null, 'no namespace yet -> local only');
+
+console.log('ALL PASS: wrapper, registration, projection, watermarks, workspace aggregation, hidden chats, first-visit seeding, host-side shared marks');
