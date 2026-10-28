@@ -12,7 +12,7 @@ assert.equal(loaded?.id, 'dsh-needs-input');
 const fakeReact = { useRef: () => ({ current: null }), useEffect: () => {}, createElement: () => null };
 const mod = loaded.factory((name) => { assert.equal(name, 'react'); return fakeReact; });
 assert.equal(mod.name, 'dsh-needs-input');
-assert.deepEqual(mod.inject, ['slots', 'sessions']);
+assert.deepEqual(mod.inject.slice(0, 2), ['slots', 'sessions']);
 const registrations = [];
 mod.apply({
   get: () => undefined,

@@ -67,7 +67,10 @@ window.__ModuleLoader__.load({
       if (!remote?.settings?.describe) return false;
       try {
         const described = await remote.settings.describe();
-        const ns = pickNamespace(described?.namespaces);
+        // The typed remote wrapper returns the RPC envelope {ok, value:{namespaces,...}} (2026-10-28).
+        const payload = described && described.value !== undefined ? described.value : described;
+        if (described && described.ok === false) throw new Error(described.error?.message || "settings/describe refused");
+        const ns = pickNamespace(payload?.namespaces);
         if (!ns) return false;
         server.ns = ns.ns;
         const rows = [ns.value?.acks, ns.user?.acks].find((v) => Array.isArray(v) && v.length) || [];
@@ -86,14 +89,15 @@ window.__ModuleLoader__.load({
       pushTimer = setTimeout(async () => {
         pushTimer = null;
         try {
-          await remote.settings.update(server.ns, { acks: mapToRows(server.acks, server.rows) }, server.revision);
-          server.revision += 1;
+          const res = await remote.settings.update(server.ns, { acks: mapToRows(server.acks, server.rows) }, server.revision);
+          if (res && res.ok === false) throw new Error(res.error?.message || "settings/update refused");
+          server.revision = Number(res?.value?.revision ?? server.revision + 1);
         } catch {
           // another device wrote first: re-read, merge ours back in, retry once
           const mine = server.acks;
           if (await loadServerAcks()) {
             server.acks = combineAckObjects(server.acks, mine);
-            try { await remote.settings.update(server.ns, { acks: mapToRows(server.acks, server.rows) }, server.revision); server.revision += 1; } catch { /* keep local only */ }
+            try { const r2 = await remote.settings.update(server.ns, { acks: mapToRows(server.acks, server.rows) }, server.revision); if (r2 && r2.ok === false) throw new Error(r2.error?.message); server.revision = Number(r2?.value?.revision ?? server.revision + 1); } catch { /* keep local only */ }
           }
         }
         window.dispatchEvent(new Event("dsh-needs-input-refresh"));
@@ -364,7 +368,9 @@ window.__ModuleLoader__.load({
     }
 
     exports.name = "dsh-needs-input";
-    exports.inject = ["slots", "sessions"];
+    // cordis throws "cannot get property \"remote\" without inject" on ANY undeclared ctx.* read (optional
+    // chaining does not help), and the browser swallows it into fiber state "failed" (2026-10-28).
+    exports.inject = ["slots", "sessions", "remote", "remote.settings"];   // cordis checks EVERY level of a ctx.* read: the parent service AND the nested path
     exports.apply = apply;
     exports.workspaceCounts = workspaceCounts; // exposed for verify.mjs
     exports.seedMarks = seedMarks;             // exposed for verify.mjs

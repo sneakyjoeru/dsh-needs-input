@@ -1,5 +1,8 @@
 import { z } from 'zod';
-import Schema from '@deepseek-ai/schemastery';
+// The profile's own schemastery (3.18.2, resolved from profiles/web/node_modules) has no `.volatile()`,
+// and dsh-settings exposes a namespace ONLY for volatile fields (`volatileForm(schema)` in describe()).
+// Use the harness copy (3.18.5), which is also what every shipped settings-exposed plugin uses.
+import Schema from '/usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/schemastery/lib/index.mjs';
 
 export const NEEDS_INPUT_KEY = 'needsInput';
 const schema = z.object({
@@ -31,9 +34,6 @@ export const needsInputProjection = {
  * read on the desktop is read on the phone too. One entry per session: `y` = needsInputSeq seen,
  * `g` = completedSeq seen, `t` = when it was marked (diagnostics only).
  */
-// Deliberately NOT volatile: a packaged plugin resolves the profile's schemastery, whose `.volatile()`
-// does not exist (measured 2026-10-28), and nothing in the host reads these marks live — the browser
-// reads and writes them through the settings document, which is what makes them device independent.
 const AckSchema = Schema.object({
   id: Schema.string().required().description('Session id (chat) this mark belongs to.'),
   y: Schema.number().default(0).description('Highest needsInputSeq the user has seen for this chat.'),
@@ -42,7 +42,7 @@ const AckSchema = Schema.object({
 }).description('One chat read mark.');
 
 export const Config = Schema.object({
-  acks: Schema.array(AckSchema).default([])
+  acks: Schema.array(AckSchema).default([]).volatile()   // leaf-level volatile = exposed via settings/describe + settings/update
     .description('Read marks written by the browser when a chat is viewed (shared by every device).'),
 }).description('Unread-dot read marks (host-side, device independent).');
 
@@ -51,6 +51,12 @@ export const Config = Schema.object({
 export const inject = ['sessionProjections'];
 export function apply(ctx) {
   ctx.sessionProjections.register(needsInputProjection);
+  // Keep the namespace API-only: no auto-generated "acks" form in Settings (same call shipped
+  // plugins such as dsh-client-locale make). settings/describe still lists it for the browser half.
+  ctx.inject(['settings'], (child) => {
+    child.effect(() => child.settings.configure({ auto: false }, ctx.fiber));
+  });
 }
-apply.inject = ['sessionProjections'];   // cordis reads inject from the plugin object (the default-exported function)
+apply.inject = ['sessionProjections'];
+apply.Config = Config;   // dsh-settings reads the namespace schema from the plugin runtime (= this default export), not from a named export (2026-10-28)   // cordis reads inject from the plugin object (the default-exported function)
 export default apply;
