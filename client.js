@@ -142,6 +142,36 @@ window.__ModuleLoader__.load({
       }
       return out;
     }
+    // Scheduled tasks (owner request 2026-11-02): a chat with an ACTIVE scheduled task is not
+    // finished yet — each run ends a turn, but the task is still pending. Such chats get no yellow or
+    // green dot (the shipped schedule plugin's clock mark shows instead); the dots come back once the
+    // task is no longer active, so the run that fulfils it still lights the chat up.
+    const scheduled = { ids: new Set() };
+    const uiSessionRef = { current: null }; // DSH's uiSession service (owner of the native "Completed" dot)
+
+    /** Session ids that own at least one active scheduled task, from the host task catalog. */
+    function activeScheduleSessions(records) {
+      const ids = new Set();
+      for (const r of Array.isArray(records) ? records : []) {
+        if (r && r.status === "active" && typeof r.sessionId === "string") ids.add(r.sessionId);
+      }
+      return ids;
+    }
+
+    async function loadSchedules(remote) {
+      if (!remote?.schedule?.catalog) return false;
+      try {
+        const res = await remote.schedule.catalog();
+        if (res && res.ok === false) return false;
+        const records = res && res.value !== undefined ? res.value : res;
+        if (!Array.isArray(records)) return false;
+        const next = activeScheduleSessions(records);
+        const same = next.size === scheduled.ids.size && [...next].every((id) => scheduled.ids.has(id));
+        scheduled.ids = next;
+        return !same;
+      } catch { return false; }
+    }
+
     function yellowUnread(state, read) { return Boolean(state && state.needsInput !== "none" && state.needsInputSeq > read); }
     function greenUnread(state, read) { return Boolean(state && state.completedSeq > 0 && state.completedSeq > read); }
 
@@ -177,10 +207,16 @@ window.__ModuleLoader__.load({
     // opened from that workspace never lights it: archived chats (owner rule 2026-10-27 — "if all
     // chats are archived there's nothing to view"), subagent children, and blank drafts other than
     // the current one (the same rule as the shipped sidebar's sessionVisible, default filter).
-    function workspaceCounts({ sessions, workspaces, status }, read, main) {
+    function workspaceCounts({ sessions, workspaces, status }, read, main, scheduledIds) {
       const archived = new Set(workspaces.archivedSessionIds || []);
       const listed = (id) => {
         if (archived.has(id)) return false;
+        if (scheduledIds?.has?.(id)) return false; // task still scheduled: not finished yet
+        // A running chat is not finished: its row shows the native "running" dot and none of ours,
+        // so the workspace must not count its previous completion either (owner report 2026-11-02:
+        // the one active chat lit its whole workspace).
+        if (status?.get?.(id)?.running) return false;
+
         const s = sessions.byId?.[id];
         if (s?.origin === "subagent") return false;
         if (s?.blank && id !== main) return false;
@@ -244,6 +280,16 @@ window.__ModuleLoader__.load({
             }
           }
 
+          // A scheduled run that ends while the chat is not open makes DSH's own row show the
+          // "Completed" dot, which also displaces the schedule clock mark. Drop that page-local
+          // reminder for chats whose task is still active, so the row goes back to the clock.
+          const ui = uiSessionRef.current;
+          if (ui && typeof ui.completionUnread?.delete === "function" && typeof ui.publishStatus === "function") {
+            let cleared = false;
+            for (const id of scheduled.ids) if (ui.completionUnread.delete(id)) cleared = true;
+            if (cleared) { try { ui.publishStatus(); } catch { /* status republishes on its next change */ } }
+          }
+
           // Session rows: additive dots in the leading cell. The native dot (pending / running /
           // completionUnread) owns that cell while it is shown; we only add ours when it is idle.
           for (const row of document.querySelectorAll('[data-row-key^="session:"]')) {
@@ -251,8 +297,9 @@ window.__ModuleLoader__.load({
             const st = stateOf(id);
             const native = status.get(id);
             const nativeBusy = Boolean(native?.pendingInteraction || native?.running || native?.completionUnread);
-            const showYellow = !nativeBusy && yellowUnread(st, Number(read[id + ":y"] ?? 0));
-            const showGreen = !nativeBusy && !showYellow && id !== main && greenUnread(st, Number(read[id + ":g"] ?? 0));
+            const pendingTask = scheduled.ids.has(id);
+            const showYellow = !nativeBusy && !pendingTask && yellowUnread(st, Number(read[id + ":y"] ?? 0));
+            const showGreen = !nativeBusy && !pendingTask && !showYellow && id !== main && greenUnread(st, Number(read[id + ":g"] ?? 0));
             const cell = row.querySelector(':scope > span[class*="slot"]') || row;
             const y = cell.querySelector(".dsh-needs-input-session-y");
             const g = cell.querySelector(".dsh-needs-input-session-g");
@@ -262,7 +309,7 @@ window.__ModuleLoader__.load({
             if (!showGreen && g) g.remove();
           }
 
-          const counts = workspaceCounts(snap, read, main);
+          const counts = workspaceCounts(snap, read, main, scheduled.ids);
           for (const row of document.querySelectorAll('[data-row-key^="workspace:"]')) {
             const id = row.getAttribute("data-row-key").slice("workspace:".length);
             const c = counts.get(id) || { yellow: 0, green: 0 };
@@ -332,8 +379,17 @@ window.__ModuleLoader__.load({
       // Host-side read marks: load once, then re-read periodically and whenever the tab regains
       // focus, so an acknowledgement made on another device clears the dots here too.
       server.remote = ctx?.remote || null;
+      uiSessionRef.current = ctx?.uiSession || null;
+      // Active scheduled tasks: initial read, every host change, and the same periodic/focus refresh.
+      const refreshSchedules = () => { loadSchedules(server.remote).then((changed) => { if (changed) window.dispatchEvent(new Event("dsh-needs-input-refresh")); }); };
+      if (server.remote?.schedule?.catalog) {
+        refreshSchedules();
+        if (typeof server.remote.$on === "function" && ctx.effect) {
+          ctx.effect(() => server.remote.$on("schedule/changed", refreshSchedules), "dsh-needs-input: schedule catalog");
+        }
+      }
       if (server.remote?.settings?.describe) {
-        const refresh = () => { loadServerAcks().then((ok) => { if (ok) window.dispatchEvent(new Event("dsh-needs-input-refresh")); }); };
+        const refresh = () => { refreshSchedules(); loadServerAcks().then((ok) => { if (ok) window.dispatchEvent(new Event("dsh-needs-input-refresh")); }); };
         refresh();
         setInterval(refresh, 15000);
         if (typeof window !== "undefined" && window.addEventListener) {
@@ -370,10 +426,11 @@ window.__ModuleLoader__.load({
     exports.name = "dsh-needs-input";
     // cordis throws "cannot get property \"remote\" without inject" on ANY undeclared ctx.* read (optional
     // chaining does not help), and the browser swallows it into fiber state "failed" (2026-10-28).
-    exports.inject = ["slots", "sessions", "remote", "remote.settings"];   // cordis checks EVERY level of a ctx.* read: the parent service AND the nested path
+    exports.inject = ["slots", "sessions", "remote", "remote.settings", "remote.schedule", "uiSession"];   // cordis checks EVERY level of a ctx.* read: the parent service AND the nested path
     exports.apply = apply;
     exports.workspaceCounts = workspaceCounts; // exposed for verify.mjs
     exports.seedMarks = seedMarks;             // exposed for verify.mjs
+    exports.activeScheduleSessions = activeScheduleSessions;
     exports.combineMarks = combineMarks;       // exposed for verify.mjs
     exports.combineAckObjects = combineAckObjects;
     exports.ackFor = ackFor;

@@ -135,3 +135,35 @@ assert.deepEqual(mod.mapToRows({ a: { y: 7, g: 5, t: 3 } }, [{ id: 'b', y: 1, g:
 assert.equal(mod.pickNamespace([]), null, 'no namespace yet -> local only');
 
 console.log('ALL PASS: wrapper, registration, projection, watermarks, workspace aggregation, hidden chats, first-visit seeding, host-side shared marks');
+
+// 9. Scheduled tasks (2026-11-02): a chat with an ACTIVE task gets no yellow/green; inactive tasks do not hide it.
+{
+  const ids = mod.activeScheduleSessions([
+    { sessionId: 'cron', status: 'active' }, { sessionId: 'done', status: 'inactive' }, null, { status: 'active' },
+  ]);
+  assert.deepEqual([...ids], ['cron'], 'only active tasks with a session id count');
+  const snap = {
+    sessions: { byId: { cron: {}, done: {} }, projectionsBySession: {
+      cron: { values: { needsInput: { needsInput: 'failed', needsInputSeq: 9, completedSeq: 8 } } },
+      done: { values: { needsInput: { needsInput: 'none', needsInputSeq: 1, completedSeq: 5 } } },
+    } },
+    workspaces: { items: [{ workspaceId: 'w', sessionIds: ['cron', 'done'] }], archivedSessionIds: [] },
+    status: new Map([['cron', { completionUnread: true }]]),
+  };
+  assert.deepEqual(mod.workspaceCounts(snap, {}, undefined, ids).get('w'), { yellow: 0, green: 1 }, 'scheduled chat (even with native completionUnread) is not counted; the finished one is');
+  assert.deepEqual(mod.workspaceCounts(snap, {}, undefined, new Set()).get('w'), { yellow: 1, green: 1 }, 'once the task ends the chat counts again');
+}
+console.log('schedule suppression: ok');
+
+// 10. A RUNNING chat never counts toward its workspace (its row shows the native running dot only).
+{
+  const snap = {
+    sessions: { byId: { live: {} }, projectionsBySession: { live: { values: { needsInput: { needsInput: 'none', needsInputSeq: 693, completedSeq: 688 } } } } },
+    workspaces: { items: [{ workspaceId: 'w', sessionIds: ['live'] }], archivedSessionIds: [] },
+    status: new Map([['live', { running: true }]]),
+  };
+  assert.deepEqual(mod.workspaceCounts(snap, { 'live:g': 578 }, undefined).get('w'), { yellow: 0, green: 0 }, 'running chat is not "finished unread"');
+  snap.status = new Map([['live', { running: false }]]);
+  assert.deepEqual(mod.workspaceCounts(snap, { 'live:g': 578 }, undefined).get('w'), { yellow: 0, green: 1 }, 'once it stops (not open), it counts');
+}
+console.log('running chats excluded: ok');
