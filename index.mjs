@@ -6,7 +6,9 @@ import Schema from '/usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules/@d
 
 export const NEEDS_INPUT_KEY = 'needsInput';
 const schema = z.object({
-  needsInput: z.enum(['none', 'blocked', 'failed', 'error']),
+  // 'failed' is the pre-2026-11-03 shared state for error AND max-tokens; no host emits it any more,
+  // it stays in the enum so rows written by an older process still validate.
+  needsInput: z.enum(['none', 'blocked', 'failed', 'error', 'max-tokens']),
   needsInputSeq: z.number().int().nonnegative(),
   completedSeq: z.number().int().nonnegative(),
 }).strict();
@@ -27,7 +29,7 @@ export const needsInputProjection = {
     // proceeded (a new message, same model or another one). Opening/reading it must not clear it.
     if (kind === 'error') return { ...state, needsInput: 'error', needsInputSeq: event.seq };
     // max-tokens is not an error: it keeps the yellow "needs you" dot, which reading clears.
-    if (kind === 'max-tokens') return { ...state, needsInput: 'failed', needsInputSeq: event.seq };
+    if (kind === 'max-tokens') return { ...state, needsInput: 'max-tokens', needsInputSeq: event.seq };
     if (kind === 'completed') return { ...state, completedSeq: event.seq };
     return state;
   },

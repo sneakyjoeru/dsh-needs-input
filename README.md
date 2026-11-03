@@ -40,3 +40,7 @@ message — same model or a different one (the host projection then sets `needsI
   subscription), and first-visit seeding skips error chats, so a fresh browser cannot swallow the dot.
 - **The host half activates on the next dsh process start** — the running process keeps the module it
   imported at boot.
+
+**No restart needed (2026-11-03):** the browser also treats the legacy `failed` state (what the pre-update
+host writes for an error) as red, so the sticky red dot works on the running process. After the next dsh
+start the host emits `error` / `max-tokens` separately, and only `error` stays red.

@@ -25,7 +25,7 @@ assert.equal(registrations[0].made.opts.name, 'shell.overlay');
 assert.equal(typeof registrations[0].made.component, 'function');
 
 // 2. Host projection: yellow on blocked/error/max-tokens, green on completed, independent sequences.
-const isYellow = (s, read = 0) => Boolean(s?.needsInput !== 'none' && s?.needsInput !== 'error' && s.needsInputSeq > read);
+const isYellow = (s, read = 0) => Boolean(s && (s.needsInput === 'blocked' || s.needsInput === 'max-tokens') && s.needsInputSeq > read);
 const isGreen = (s, read = 0) => Boolean(s?.completedSeq > 0 && s.completedSeq > read);
 let state = needsInputProjection.init({}, 0);
 assert.deepEqual(state, { needsInput: 'none', needsInputSeq: 0, completedSeq: 0 });
@@ -46,7 +46,7 @@ assert.equal(needsInputProjection.apply(errState, { type: 'user/message', seq: 1
 assert.equal(isYellow(needsInputProjection.apply(needsInputProjection.init({}, 0), { type: 'turn/end', seq: 9, data: { reason: { kind: 'max-tokens' } } })), true);
 
 // 3. Workspace aggregation: both colours independent; a yellow chat is not double-counted as green.
-const states = { a: { needsInput: 'failed', needsInputSeq: 11, completedSeq: 12 }, b: { needsInput: 'none', needsInputSeq: 3, completedSeq: 12 }, c: { needsInput: 'none', needsInputSeq: 0, completedSeq: 0 } };
+const states = { a: { needsInput: 'blocked', needsInputSeq: 11, completedSeq: 12 }, b: { needsInput: 'none', needsInputSeq: 3, completedSeq: 12 }, c: { needsInput: 'none', needsInputSeq: 0, completedSeq: 0 } };
 const count = (ids, reads = {}) => ids.reduce((acc, id) => {
   if (isYellow(states[id], reads[id + ':y'] ?? 0)) acc.yellow++;
   else if (isGreen(states[id], reads[id + ':g'] ?? 0)) acc.green++;
@@ -148,7 +148,7 @@ console.log('ALL PASS: wrapper, registration, projection, watermarks, workspace 
   assert.deepEqual([...ids], ['cron'], 'only active tasks with a session id count');
   const snap = {
     sessions: { byId: { cron: {}, done: {} }, projectionsBySession: {
-      cron: { values: { needsInput: { needsInput: 'failed', needsInputSeq: 9, completedSeq: 8 } } },
+      cron: { values: { needsInput: { needsInput: 'blocked', needsInputSeq: 9, completedSeq: 8 } } },
       done: { values: { needsInput: { needsInput: 'none', needsInputSeq: 1, completedSeq: 5 } } },
     } },
     workspaces: { items: [{ workspaceId: 'w', sessionIds: ['cron', 'done'] }], archivedSessionIds: [] },

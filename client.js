@@ -181,9 +181,11 @@ window.__ModuleLoader__.load({
 
     // ERROR (red) has NO read watermark on purpose: an error keeps its dot until the chat is proceeded
     // with a new message (owner rule 2026-11-03 — "don't remove red dot for chats with errors").
-    function redUnread(state) { return Boolean(state && state.needsInput === "error"); }
+    // 'failed' is the legacy state an older host wrote for BOTH error and max-tokens; today's host says
+    // 'error'. Treat both as red so the dot works without waiting for a dsh restart (2026-11-03).
+    function redUnread(state) { return Boolean(state && (state.needsInput === "error" || state.needsInput === "failed")); }
     function yellowUnread(state, read) {
-      return Boolean(state && state.needsInput !== "none" && state.needsInput !== "error" && state.needsInputSeq > read);
+      return Boolean(state && (state.needsInput === "blocked" || state.needsInput === "max-tokens") && state.needsInputSeq > read);
     }
     function greenUnread(state, read) { return Boolean(state && state.completedSeq > 0 && state.completedSeq > read); }
 
