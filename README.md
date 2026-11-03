@@ -39,9 +39,11 @@ chat is continued, which resets the chat's state on the host.
   workspace title, one per colour, with the chat count in the tooltip.
 - DSH's own row indicators (pending interaction, running, completion reminder) keep priority: the plugin draws
   its dot only when the native indicator is idle.
-- For a chat with an active scheduled task, DSH's in-page "completed" reminder is cleared so the clock stays
-  visible. This touches the `uiSession` service defensively — if a future DSH changes it, the row falls back to
-  the normal completion reminder instead of breaking.
+- DSH's in-page "completed" reminder is cleared for two kinds of chat: one with an active scheduled task (so the
+  clock stays visible) and one whose last turn failed (a failed chat must never show the green finished dot — the
+  reminder would otherwise paint green until the chat is opened). This touches the `uiSession` service
+  defensively: if a future DSH changes it, the row falls back to the normal completion reminder instead of
+  breaking.
 
 ## Install (web profile)
 
