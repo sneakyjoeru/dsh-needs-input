@@ -14,6 +14,7 @@ window.__ModuleLoader__.load({
     const PAGE_LOADED_AT = Date.now();
     const YELLOW = "var(--dsw-alias-state-warning-primary, #f2c94c)";
     const GREEN = "var(--dsw-alias-state-success-primary, #45b36b)";
+    const RED = "var(--dsw-alias-state-error-primary, #e5484d)";
 
     function readMarks() {
       try {
@@ -45,9 +46,15 @@ window.__ModuleLoader__.load({
       return out;
     }
 
-    /** The mark to store for one chat once it has been viewed. */
+    /**
+     * The mark to store for one chat once it has been viewed. An ERROR (red dot) is deliberately not
+     * acknowledgeable: y stays where it is, so opening or reading the chat cannot clear it — only the
+     * next message in that chat does (the host projection then sets needsInput back to "none").
+     */
     function ackFor(state, existing) {
-      const y = Math.max(Number(existing?.y ?? 0), Number(state?.needsInputSeq ?? 0));
+      const y = state?.needsInput === "error"
+        ? Number(existing?.y ?? 0)
+        : Math.max(Number(existing?.y ?? 0), Number(state?.needsInputSeq ?? 0));
       const g = Math.max(Number(existing?.g ?? 0), Number(state?.completedSeq ?? 0));
       return { y, g, t: Date.now() };
     }
@@ -172,7 +179,12 @@ window.__ModuleLoader__.load({
       } catch { return false; }
     }
 
-    function yellowUnread(state, read) { return Boolean(state && state.needsInput !== "none" && state.needsInputSeq > read); }
+    // ERROR (red) has NO read watermark on purpose: an error keeps its dot until the chat is proceeded
+    // with a new message (owner rule 2026-11-03 — "don't remove red dot for chats with errors").
+    function redUnread(state) { return Boolean(state && state.needsInput === "error"); }
+    function yellowUnread(state, read) {
+      return Boolean(state && state.needsInput !== "none" && state.needsInput !== "error" && state.needsInputSeq > read);
+    }
     function greenUnread(state, read) { return Boolean(state && state.completedSeq > 0 && state.completedSeq > read); }
 
     // Read marks are per-browser (localStorage) and DSH's own `completionUnread` lives only in the
@@ -192,6 +204,7 @@ window.__ModuleLoader__.load({
         if (next[id + ":y"] !== undefined || next[id + ":g"] !== undefined) continue;
         const st = sessions.projectionsBySession?.[id]?.values?.needsInput;
         if (!st) continue; // nothing folded yet: decide when it arrives
+        if (st.needsInput === "error") continue; // red is sticky: a first visit must not swallow it
         const updated = sessions.byId?.[id]?.updatedAt;
         if (!(typeof updated === "number" && updated >= pageLoadedAt)) {
           next[id + ":y"] = Number(st.needsInputSeq ?? 0);
@@ -225,14 +238,15 @@ window.__ModuleLoader__.load({
       const stateOf = (id) => sessions.projectionsBySession?.[id]?.values?.needsInput;
       const counts = new Map();
       for (const w of workspaces.items || []) {
-        let yellow = 0, green = 0;
+        let red = 0, yellow = 0, green = 0;
         for (const id of w.sessionIds || []) {
           if (!listed(id)) continue;
           const st = stateOf(id);
-          if (yellowUnread(st, Number(read[id + ":y"] ?? 0))) yellow++;
+          if (redUnread(st)) red++;
+          else if (yellowUnread(st, Number(read[id + ":y"] ?? 0))) yellow++;
           else if (id !== main && (greenUnread(st, Number(read[id + ":g"] ?? 0)) || status?.get?.(id)?.completionUnread)) green++;
         }
-        counts.set(w.workspaceId, { yellow, green });
+        counts.set(w.workspaceId, { red, yellow, green });
       }
       return counts;
     }
@@ -270,7 +284,8 @@ window.__ModuleLoader__.load({
           // sidebar click (owner report 2026-10-28 — chats that were read still came back unread).
           if (main) {
             const st = stateOf(main);
-            if (st && (Number(st.needsInputSeq ?? 0) > Number(read[main + ":y"] ?? 0) || Number(st.completedSeq ?? 0) > Number(read[main + ":g"] ?? 0))) {
+            // An error is not acknowledgeable (red dot), so do not queue a write that would change nothing.
+            if (st && st.needsInput !== "error" && (Number(st.needsInputSeq ?? 0) > Number(read[main + ":y"] ?? 0) || Number(st.completedSeq ?? 0) > Number(read[main + ":g"] ?? 0))) {
               const ack = ackFor(st, { y: read[main + ":y"], g: read[main + ":g"] });
               read[main + ":y"] = ack.y;
               read[main + ":g"] = ack.g;
@@ -298,12 +313,17 @@ window.__ModuleLoader__.load({
             const native = status.get(id);
             const nativeBusy = Boolean(native?.pendingInteraction || native?.running || native?.completionUnread);
             const pendingTask = scheduled.ids.has(id);
-            const showYellow = !nativeBusy && !pendingTask && yellowUnread(st, Number(read[id + ":y"] ?? 0));
-            const showGreen = !nativeBusy && !pendingTask && !showYellow && id !== main && greenUnread(st, Number(read[id + ":g"] ?? 0));
+            // The red error dot outranks the other two and is not clearable by viewing.
+            const showRed = !nativeBusy && redUnread(st);
+            const showYellow = !nativeBusy && !pendingTask && !showRed && yellowUnread(st, Number(read[id + ":y"] ?? 0));
+            const showGreen = !nativeBusy && !pendingTask && !showRed && !showYellow && id !== main && greenUnread(st, Number(read[id + ":g"] ?? 0));
             const cell = row.querySelector(':scope > span[class*="slot"]') || row;
+            const r = cell.querySelector(".dsh-needs-input-session-r");
             const y = cell.querySelector(".dsh-needs-input-session-y");
             const g = cell.querySelector(".dsh-needs-input-session-g");
-            if (showYellow && !y) cell.appendChild(dot("dsh-needs-input-session-y", st.needsInput === "failed" ? "Unread: the task stopped on an error and may need you" : "Unread: the task is blocked and needs you", YELLOW));
+            if (showRed && !r) cell.appendChild(dot("dsh-needs-input-session-r", "The last turn failed with an error; it stays marked until you continue the chat", RED));
+            if (!showRed && r) r.remove();
+            if (showYellow && !y) cell.appendChild(dot("dsh-needs-input-session-y", st.needsInput === "failed" ? "Unread: the output token limit stopped the turn" : "Unread: the task is blocked and needs you", YELLOW));
             if (!showYellow && y) y.remove();
             if (showGreen && !g) cell.appendChild(dot("dsh-needs-input-session-g", "Unread: the task finished", GREEN));
             if (!showGreen && g) g.remove();
@@ -312,13 +332,13 @@ window.__ModuleLoader__.load({
           const counts = workspaceCounts(snap, read, main, scheduled.ids);
           for (const row of document.querySelectorAll('[data-row-key^="workspace:"]')) {
             const id = row.getAttribute("data-row-key").slice("workspace:".length);
-            const c = counts.get(id) || { yellow: 0, green: 0 };
+            const c = counts.get(id) || { red: 0, yellow: 0, green: 0 };
             // projectRow is a flex ROW but projectText is a flex COLUMN, so a dot appended inside
             // projectText wraps under the name. Insert one fixed cell as a row sibling right
             // before the title block: same line, before the workspace name, visible on hover too.
             const text = row.querySelector(':scope > span[class*="projectText"]');
             let anchor = row.querySelector(":scope > .dsh-needs-input-ws");
-            if (!c.yellow && !c.green) { if (anchor) anchor.remove(); continue; }
+            if (!c.red && !c.yellow && !c.green) { if (anchor) anchor.remove(); continue; }
             if (!anchor) {
               anchor = document.createElement("span");
               anchor.className = "dsh-needs-input-dot dsh-needs-input-ws";
@@ -327,15 +347,21 @@ window.__ModuleLoader__.load({
               anchor.style.cssText = "display:inline-flex;align-items:center;flex:none;height:20px;gap:3px;margin-right:-2px";
               if (text) row.insertBefore(anchor, text); else row.appendChild(anchor);
             }
+            const r = anchor.querySelector(".dsh-needs-input-ws-r");
             const y = anchor.querySelector(".dsh-needs-input-ws-y");
             const g = anchor.querySelector(".dsh-needs-input-ws-g");
             const tight = (node) => { node.style.width = "9px"; return node; };
+            // Red (a chat in this workspace ended on an error) leads the row.
+            if (c.red && !r) anchor.insertBefore(tight(dot("dsh-needs-input-ws-r", "", RED)), anchor.firstChild);
+            if (!c.red && r) r.remove();
             if (c.yellow && !y) anchor.appendChild(tight(dot("dsh-needs-input-ws-y", "", YELLOW)));
             if (!c.yellow && y) y.remove();
             if (c.green && !g) anchor.appendChild(tight(dot("dsh-needs-input-ws-g", "", GREEN)));
             if (!c.green && g) g.remove();
+            const rr = anchor.querySelector(".dsh-needs-input-ws-r");
             const yy = anchor.querySelector(".dsh-needs-input-ws-y");
             const gg = anchor.querySelector(".dsh-needs-input-ws-g");
+            if (rr) { rr.title = c.red + " chat" + (c.red === 1 ? "" : "s") + " ended on an error (stays until continued)"; rr.setAttribute("aria-label", rr.title); }
             if (yy) { yy.title = c.yellow + " chat" + (c.yellow === 1 ? "" : "s") + " need your input"; yy.setAttribute("aria-label", yy.title); }
             if (gg) { gg.title = c.green + " finished chat" + (c.green === 1 ? "" : "s") + " unread"; gg.setAttribute("aria-label", gg.title); }
           }
@@ -408,7 +434,8 @@ window.__ModuleLoader__.load({
           const st = list.projectionsBySession?.[main]?.values?.needsInput;
           if (!st) return;
           const read = readMarks();
-          const y = Math.max(Number(read[main + ":y"] ?? 0), Number(st.needsInputSeq ?? 0));
+          // Same rule as ackFor: a red error chat keeps its mark, only a new message clears it.
+          const y = st.needsInput === "error" ? Number(read[main + ":y"] ?? 0) : Math.max(Number(read[main + ":y"] ?? 0), Number(st.needsInputSeq ?? 0));
           const g = Math.max(Number(read[main + ":g"] ?? 0), Number(st.completedSeq ?? 0));
           if (read[main + ":y"] !== y || read[main + ":g"] !== g) writeMarks({ ...read, [main + ":y"]: y, [main + ":g"]: g });
         }), "dsh-needs-input: main-view acknowledgement");

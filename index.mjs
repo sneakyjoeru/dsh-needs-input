@@ -6,13 +6,16 @@ import Schema from '/usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules/@d
 
 export const NEEDS_INPUT_KEY = 'needsInput';
 const schema = z.object({
-  needsInput: z.enum(['none', 'blocked', 'failed']),
+  needsInput: z.enum(['none', 'blocked', 'failed', 'error']),
   needsInputSeq: z.number().int().nonnegative(),
   completedSeq: z.number().int().nonnegative(),
 }).strict();
 export const needsInputProjection = {
   key: NEEDS_INPUT_KEY,
-  stateVersion: 1,
+  // 2 since 2026-11-03: 'error' is its own sticky state (red dot, cleared only by the next message in
+  // that chat). The bump also makes the host discard cached v1 rows and re-fold from the log, so chats
+  // that already ended on an error show the red dot without being reopened.
+  stateVersion: 2,
   stateSchema: schema,
   init: () => ({ needsInput: 'none', needsInputSeq: 0, completedSeq: 0 }),
   apply(state, event) {
@@ -20,7 +23,11 @@ export const needsInputProjection = {
     if (event.type !== 'turn/end') return state;
     const kind = event.data?.reason?.kind;
     if (kind === 'blocked') return { ...state, needsInput: 'blocked', needsInputSeq: event.seq };
-    if (kind === 'error' || kind === 'max-tokens') return { ...state, needsInput: 'failed', needsInputSeq: event.seq };
+    // Owner rule 2026-11-03: a turn that ended on an error keeps the RED dot until the chat is
+    // proceeded (a new message, same model or another one). Opening/reading it must not clear it.
+    if (kind === 'error') return { ...state, needsInput: 'error', needsInputSeq: event.seq };
+    // max-tokens is not an error: it keeps the yellow "needs you" dot, which reading clears.
+    if (kind === 'max-tokens') return { ...state, needsInput: 'failed', needsInputSeq: event.seq };
     if (kind === 'completed') return { ...state, completedSeq: event.seq };
     return state;
   },

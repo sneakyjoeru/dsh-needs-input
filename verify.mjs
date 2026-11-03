@@ -25,7 +25,7 @@ assert.equal(registrations[0].made.opts.name, 'shell.overlay');
 assert.equal(typeof registrations[0].made.component, 'function');
 
 // 2. Host projection: yellow on blocked/error/max-tokens, green on completed, independent sequences.
-const isYellow = (s, read = 0) => Boolean(s?.needsInput !== 'none' && s.needsInputSeq > read);
+const isYellow = (s, read = 0) => Boolean(s?.needsInput !== 'none' && s?.needsInput !== 'error' && s.needsInputSeq > read);
 const isGreen = (s, read = 0) => Boolean(s?.completedSeq > 0 && s.completedSeq > read);
 let state = needsInputProjection.init({}, 0);
 assert.deepEqual(state, { needsInput: 'none', needsInputSeq: 0, completedSeq: 0 });
@@ -38,7 +38,11 @@ state = needsInputProjection.apply(state, { type: 'user/message', seq: 6, time: 
 assert.deepEqual(state, { needsInput: 'none', needsInputSeq: 6, completedSeq: 5 }, 'reply clears yellow, keeps green');
 assert.equal(isGreen(state, 4), true);
 assert.equal(isGreen(state, 5), false, 'reading at/after the completion clears green');
-assert.equal(isYellow(needsInputProjection.apply(needsInputProjection.init({}, 0), { type: 'turn/end', seq: 9, data: { reason: { kind: 'error', error: { message: 'x', code: 'UNKNOWN' } } } })), true);
+const errState = needsInputProjection.apply(needsInputProjection.init({}, 0), { type: 'turn/end', seq: 9, data: { reason: { kind: 'error', error: { message: 'x', code: 'UNKNOWN' } } } });
+assert.equal(errState.needsInput, 'error', 'a turn that ended on an error is its own state');
+assert.equal(isYellow(errState), false, 'an error is RED, not yellow');
+assert.equal(mod.ackFor(errState, { y: 3, g: 1 }).y, 3, 'opening/reading an error chat does not acknowledge it');
+assert.equal(needsInputProjection.apply(errState, { type: 'user/message', seq: 10, data: { source: { kind: 'user' } } }).needsInput, 'none', 'the next message in the chat clears it - same model or another one');
 assert.equal(isYellow(needsInputProjection.apply(needsInputProjection.init({}, 0), { type: 'turn/end', seq: 9, data: { reason: { kind: 'max-tokens' } } })), true);
 
 // 3. Workspace aggregation: both colours independent; a yellow chat is not double-counted as green.
@@ -47,9 +51,9 @@ const count = (ids, reads = {}) => ids.reduce((acc, id) => {
   if (isYellow(states[id], reads[id + ':y'] ?? 0)) acc.yellow++;
   else if (isGreen(states[id], reads[id + ':g'] ?? 0)) acc.green++;
   return acc;
-}, { yellow: 0, green: 0 });
-assert.deepEqual(count(['a', 'b', 'c']), { yellow: 1, green: 1 });
-assert.deepEqual(count(['a', 'b', 'c'], { 'b:g': 12 }), { yellow: 1, green: 0 }, 'opening b clears the workspace green');
+}, { red: 0, yellow: 0, green: 0 });
+assert.deepEqual(count(['a', 'b', 'c']), { red: 0, yellow: 1, green: 1 });
+assert.deepEqual(count(['a', 'b', 'c'], { 'b:g': 12 }), { red: 0, yellow: 1, green: 0 }, 'opening b clears the workspace green');
 // 4. The SHIPPED workspaceCounts: a workspace whose chats are all archived (or are subagent
 //    children / stale blank drafts) has nothing to open, so it must show no dot (owner 2026-10-27).
 const proj = (st) => ({ values: { needsInput: st } });
@@ -70,13 +74,13 @@ const snap = {
   status: new Map(),
 };
 const wc = mod.workspaceCounts(snap, {}, undefined);
-assert.deepEqual(wc.get('allArchived'), { yellow: 0, green: 0 }, 'all chats archived -> no indicator');
-assert.deepEqual(wc.get('onlyHidden'), { yellow: 0, green: 0 }, 'subagent children and non-current blank drafts never count');
-assert.deepEqual(wc.get('mixed'), { yellow: 0, green: 1 }, 'the archived member is skipped, the live one still counts');
-assert.deepEqual(wc.get('empty'), { yellow: 0, green: 0 }, 'empty workspace -> no indicator');
-assert.deepEqual(mod.workspaceCounts(snap, {}, 'draft').get('onlyHidden'), { yellow: 1, green: 0 }, 'the CURRENT blank draft is listed, so it counts');
+assert.deepEqual(wc.get('allArchived'), { red: 0, yellow: 0, green: 0 }, 'all chats archived -> no indicator');
+assert.deepEqual(wc.get('onlyHidden'), { red: 0, yellow: 0, green: 0 }, 'subagent children and non-current blank drafts never count');
+assert.deepEqual(wc.get('mixed'), { red: 0, yellow: 0, green: 1 }, 'the archived member is skipped, the live one still counts');
+assert.deepEqual(wc.get('empty'), { red: 0, yellow: 0, green: 0 }, 'empty workspace -> no indicator');
+assert.deepEqual(mod.workspaceCounts(snap, {}, 'draft').get('onlyHidden'), { red: 0, yellow: 1, green: 0 }, 'the CURRENT blank draft is listed, so it counts');
 const unarchived = { ...snap, workspaces: { ...snap.workspaces, archivedSessionIds: [] } };
-assert.deepEqual(mod.workspaceCounts(unarchived, {}, undefined).get('allArchived'), { yellow: 1, green: 1 }, 'unarchiving brings the dots back');
+assert.deepEqual(mod.workspaceCounts(unarchived, {}, undefined).get('allArchived'), { red: 0, yellow: 1, green: 1 }, 'unarchiving brings the dots back');
 
 // 5. Fresh browser / cleared storage must NOT light up every finished chat (owner report 2026-10-27:
 //    "occasionally marks all chats in workspace as unread"). Marks seed only for old activity; a chat
@@ -101,7 +105,7 @@ assert.equal(seeded['old1:g'], 12, 'old completion recorded as already read');
 assert.equal(seeded['old2:y'], 11, 'old block recorded as already read');
 assert.equal(seeded['fresh:y'], undefined, 'activity newer than the page load stays unseeded');
 assert.equal(seeded['fresh:g'], undefined);
-assert.deepEqual(mod.workspaceCounts(seedSnap, seeded, undefined).get('w'), { yellow: 0, green: 1 }, 'only the chat that finished while watching counts; not the whole workspace');
+assert.deepEqual(mod.workspaceCounts(seedSnap, seeded, undefined).get('w'), { red: 0, yellow: 0, green: 1 }, 'only the chat that finished while watching counts; not the whole workspace');
 assert.equal(mod.seedMarks(seedSnap, seeded, NOW), null, 'already-seeded marks are never rewritten (no loop, read state preserved)');
 const partial = { 'old1:y': 11, 'old1:g': 12 };
 const afterPartial = mod.seedMarks(seedSnap, partial, NOW);
@@ -150,8 +154,8 @@ console.log('ALL PASS: wrapper, registration, projection, watermarks, workspace 
     workspaces: { items: [{ workspaceId: 'w', sessionIds: ['cron', 'done'] }], archivedSessionIds: [] },
     status: new Map([['cron', { completionUnread: true }]]),
   };
-  assert.deepEqual(mod.workspaceCounts(snap, {}, undefined, ids).get('w'), { yellow: 0, green: 1 }, 'scheduled chat (even with native completionUnread) is not counted; the finished one is');
-  assert.deepEqual(mod.workspaceCounts(snap, {}, undefined, new Set()).get('w'), { yellow: 1, green: 1 }, 'once the task ends the chat counts again');
+  assert.deepEqual(mod.workspaceCounts(snap, {}, undefined, ids).get('w'), { red: 0, yellow: 0, green: 1 }, 'scheduled chat (even with native completionUnread) is not counted; the finished one is');
+  assert.deepEqual(mod.workspaceCounts(snap, {}, undefined, new Set()).get('w'), { red: 0, yellow: 1, green: 1 }, 'once the task ends the chat counts again');
 }
 console.log('schedule suppression: ok');
 
@@ -162,8 +166,23 @@ console.log('schedule suppression: ok');
     workspaces: { items: [{ workspaceId: 'w', sessionIds: ['live'] }], archivedSessionIds: [] },
     status: new Map([['live', { running: true }]]),
   };
-  assert.deepEqual(mod.workspaceCounts(snap, { 'live:g': 578 }, undefined).get('w'), { yellow: 0, green: 0 }, 'running chat is not "finished unread"');
+  assert.deepEqual(mod.workspaceCounts(snap, { 'live:g': 578 }, undefined).get('w'), { red: 0, yellow: 0, green: 0 }, 'running chat is not "finished unread"');
   snap.status = new Map([['live', { running: false }]]);
-  assert.deepEqual(mod.workspaceCounts(snap, { 'live:g': 578 }, undefined).get('w'), { yellow: 0, green: 1 }, 'once it stops (not open), it counts');
+  assert.deepEqual(mod.workspaceCounts(snap, { 'live:g': 578 }, undefined).get('w'), { red: 0, yellow: 0, green: 1 }, 'once it stops (not open), it counts');
 }
 console.log('running chats excluded: ok');
+
+// 11. RED error dot (owner rule 2026-11-03): counted even when fully read, cleared only by continuing
+//     the chat, and never swallowed by the first-visit seeding.
+{
+  const mk = (st) => ({ sessions: { byId: { e: {}, ok: {} }, projectionsBySession: {
+    e: { values: { needsInput: st } },
+    ok: { values: { needsInput: { needsInput: 'none', needsInputSeq: 1, completedSeq: 2 } } } } },
+    workspaces: { items: [{ workspaceId: 'w', sessionIds: ['e', 'ok'] }], archivedSessionIds: [] }, status: new Map() });
+  const err = { needsInput: 'error', needsInputSeq: 9, completedSeq: 0 };
+  assert.deepEqual(mod.workspaceCounts(mk(err), { 'e:y': 9, 'e:g': 9 }, undefined).get('w'), { red: 1, yellow: 0, green: 1 }, 'a fully-read error chat still counts red');
+  assert.deepEqual(mod.workspaceCounts(mk({ needsInput: 'blocked', needsInputSeq: 9, completedSeq: 0 }), { 'e:y': 9 }, undefined).get('w'), { red: 0, yellow: 0, green: 1 }, 'blocked is yellow and reading clears it, as before');
+  const snap = { sessions: { byId: { e: { updatedAt: 1 } }, projectionsBySession: { e: { values: { needsInput: err } } } }, workspaces: { items: [{ workspaceId: 'w', sessionIds: ['e'] }] } };
+  assert.equal(mod.seedMarks(snap, {}, 1000), null, 'first-visit seeding must not mark an error chat read');
+  console.log('red error dot: ok');
+}

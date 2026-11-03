@@ -26,3 +26,17 @@ on the desktop clears the dot on the phone.
 - A chat shown in the **main view** is acknowledged continuously (previously only a sidebar click
   counted, so chats read in the main pane came back unread after a reload).
 - First visit still seeds old activity as read, so history never lights up in bulk.
+
+## Red error dot is sticky (owner rule 2026-11-03)
+
+A turn that ended on an **error** (`turn/end` reason `error`, e.g. a provider 429) raises a **red** dot that
+opening or reading the chat does **not** clear. It goes away only when the chat is proceeded with a new
+message — same model or a different one (the host projection then sets `needsInput` back to `none`).
+
+- Host (projection `stateVersion: 2`): `error` is its own state; the version bump discards cached v1 rows
+  and re-folds from the session log, so chats that already ended on an error light up without being reopened.
+- `max-tokens` is NOT an error and keeps the yellow dot, which reading clears. `blocked` stays yellow.
+- The browser never advances the read mark for `error` (`ackFor`, the main-view auto-ack, the list
+  subscription), and first-visit seeding skips error chats, so a fresh browser cannot swallow the dot.
+- **The host half activates on the next dsh process start** — the running process keeps the module it
+  imported at boot.
