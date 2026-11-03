@@ -186,3 +186,21 @@ console.log('running chats excluded: ok');
   assert.equal(mod.seedMarks(snap, {}, 1000), null, 'first-visit seeding must not mark an error chat read');
   console.log('red error dot: ok');
 }
+
+// 12. A failed chat must never look FINISHED. DSH's own reminder (uiSession.completionUnread) is what
+//     paints the green "completed" dot before a chat is opened, so it is cleared for error chats.
+{
+  const snap = { byId: { e: {}, f: {}, ok: {} }, projectionsBySession: {
+    e: { values: { needsInput: { needsInput: 'error', needsInputSeq: 3, completedSeq: 0 } } },
+    f: { values: { needsInput: { needsInput: 'failed', needsInputSeq: 3, completedSeq: 0 } } },
+    ok: { values: { needsInput: { needsInput: 'none', needsInputSeq: 1, completedSeq: 9 } } },
+  } };
+  assert.deepEqual([...mod.errorIds(snap)].sort(), ['e', 'f'], 'both the new and the legacy error state count');
+  const ui = { completionUnread: new Set(['e', 'f', 'ok', 'sched']), published: 0, publishStatus() { this.published++; } };
+  const cleared = mod.clearNativeCompletions(ui, ['sched'], mod.errorIds(snap));
+  assert.equal(cleared, true);
+  assert.deepEqual([...ui.completionUnread], ['ok'], 'error and scheduled chats lose the finished-looking dot; a normal completion keeps it');
+  assert.equal(ui.published, 1, 'republished once so the row repaints');
+  assert.equal(mod.clearNativeCompletions(ui, ['sched'], mod.errorIds(snap)), false, 'second pass is a no-op');
+  console.log('no green for failed chats: ok');
+}

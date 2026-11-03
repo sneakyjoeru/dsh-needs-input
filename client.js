@@ -189,6 +189,34 @@ window.__ModuleLoader__.load({
     }
     function greenUnread(state, read) { return Boolean(state && state.completedSeq > 0 && state.completedSeq > read); }
 
+    /** Chats whose last turn failed: they must never look finished (see clearNativeCompletions). */
+    function errorIds(sessions) {
+      const ids = new Set();
+      for (const id of Object.keys(sessions.byId || {})) {
+        const st = sessions.projectionsBySession?.[id]?.values?.needsInput;
+        if (st && (st.needsInput === "error" || st.needsInput === "failed")) ids.add(id);
+      }
+      return ids;
+    }
+
+    /**
+     * Drop DSH's own page-local "Completed" reminder, which owns the row's leading cell and would
+     * otherwise show a finished-looking dot (green) instead of ours:
+     *  - a chat with an ACTIVE scheduled task keeps the schedule clock mark;
+     *  - a chat whose last turn FAILED must never show green — it shows red until the chat is continued.
+     * Pure enough to unit-test: it only touches the two sets it is given.
+     */
+    function clearNativeCompletions(ui, scheduledIds, errors) {
+      if (!ui || typeof ui.completionUnread?.delete !== "function") return false;
+      let cleared = false;
+      for (const id of scheduledIds || []) if (ui.completionUnread.delete(id)) cleared = true;
+      for (const id of errors || []) if (ui.completionUnread.delete(id)) cleared = true;
+      if (cleared && typeof ui.publishStatus === "function") {
+        try { ui.publishStatus(); } catch { /* status republishes on its next change */ }
+      }
+      return cleared;
+    }
+
     // Read marks are per-browser (localStorage) and DSH's own `completionUnread` lives only in the
     // page's memory — so on a NEW browser, a cleared storage, another device, or the other origin
     // (127.0.0.1:3081 vs the public hostname) every chat that ever finished looked unread and the
@@ -297,15 +325,11 @@ window.__ModuleLoader__.load({
             }
           }
 
-          // A scheduled run that ends while the chat is not open makes DSH's own row show the
-          // "Completed" dot, which also displaces the schedule clock mark. Drop that page-local
-          // reminder for chats whose task is still active, so the row goes back to the clock.
-          const ui = uiSessionRef.current;
-          if (ui && typeof ui.completionUnread?.delete === "function" && typeof ui.publishStatus === "function") {
-            let cleared = false;
-            for (const id of scheduled.ids) if (ui.completionUnread.delete(id)) cleared = true;
-            if (cleared) { try { ui.publishStatus(); } catch { /* status republishes on its next change */ } }
-          }
+          // A scheduled run, or a turn that failed, while the chat is not open makes DSH's own row show
+          // the "Completed" dot — green — which also displaces the schedule clock mark. Drop that
+          // page-local reminder for chats whose task is still active, and for chats that ended in error
+          // (their red dot is the truth; they must never look finished).
+          clearNativeCompletions(uiSessionRef.current, scheduled.ids, errorIds(sessions));
 
           // Session rows: additive dots in the leading cell. The native dot (pending / running /
           // completionUnread) owns that cell while it is shown; we only add ours when it is idle.
@@ -313,10 +337,12 @@ window.__ModuleLoader__.load({
             const id = row.getAttribute("data-row-key").slice("session:".length);
             const st = stateOf(id);
             const native = status.get(id);
-            const nativeBusy = Boolean(native?.pendingInteraction || native?.running || native?.completionUnread);
             const pendingTask = scheduled.ids.has(id);
-            // The red error dot outranks the other two and is not clearable by viewing.
-            const showRed = !nativeBusy && redUnread(st);
+            // The red error dot outranks the other two, is not clearable by viewing, and is not blocked
+            // by DSH's own completion reminder (which is cleared for it above but may race a re-render).
+            const active = Boolean(native?.pendingInteraction || native?.running);
+            const showRed = !active && redUnread(st);
+            const nativeBusy = Boolean(active || native?.completionUnread);
             const showYellow = !nativeBusy && !pendingTask && !showRed && yellowUnread(st, Number(read[id + ":y"] ?? 0));
             const showGreen = !nativeBusy && !pendingTask && !showRed && !showYellow && id !== main && greenUnread(st, Number(read[id + ":g"] ?? 0));
             const cell = row.querySelector(':scope > span[class*="slot"]') || row;
@@ -460,6 +486,8 @@ window.__ModuleLoader__.load({
     exports.workspaceCounts = workspaceCounts; // exposed for verify.mjs
     exports.seedMarks = seedMarks;             // exposed for verify.mjs
     exports.activeScheduleSessions = activeScheduleSessions;
+    exports.errorIds = errorIds;
+    exports.clearNativeCompletions = clearNativeCompletions;
     exports.combineMarks = combineMarks;       // exposed for verify.mjs
     exports.combineAckObjects = combineAckObjects;
     exports.ackFor = ackFor;
